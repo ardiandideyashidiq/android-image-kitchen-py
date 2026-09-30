@@ -80,7 +80,13 @@ def _certificate_for(directory: Path, name: str) -> Path | None:
     ``.x509.pem`` name, so any extension is accepted to stay compatible.
     """
     stem = f"{name}{_KEY_CERT_STEM}"
-    for candidate in sorted(directory.glob(f"{stem}*")):
+    try:
+        candidates = sorted(directory.glob(f"{stem}*"))
+    except ValueError:
+        # A name containing glob metacharacters cannot be globbed; the
+        # common ``.x509.pem`` spelling is the only sensible fallback.
+        candidates = [directory / f"{stem}.pem"]
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None

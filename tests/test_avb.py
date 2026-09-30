@@ -118,6 +118,11 @@ class TestResolveKey:
         found = resolve_key("altext", [tmp_path])
         assert found.certificate == tmp_path / "altext.x509.der"
 
+    def test_glob_metacharacters_in_name_do_not_crash(self, tmp_path: Path) -> None:
+        """A name like ``we[i]rd`` must not blow up certificate resolution."""
+        with pytest.raises(SignatureError):
+            resolve_key("we[i]rd", [tmp_path])
+
 
 def requires_key_is_file() -> None:
     if not BUNDLED_KEY.is_file() or not BUNDLED_CERT.is_file():
