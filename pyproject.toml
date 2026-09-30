@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "loguru>=0.7.3",
+    "lz4>=4.4.5",
     "rich>=15.0.0",
     "rich-click>=1.9.9",
 ]
