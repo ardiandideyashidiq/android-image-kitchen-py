@@ -1,0 +1,15 @@
+Vendored lzop binaries
+======================
+
+The `lzop` binaries under `bin/macos/*/` are prebuilt copies taken verbatim from
+the AIK-Linux / Android-Image-Kitchen distribution this repository tracks
+(`bin/macos/x86_64/lzop`, `bin/macos/i386/lzop`). No Linux build ships in that
+distribution; on Linux the resolver falls back to `$AIK_LZOP` and then to `lzop`
+on `PATH` (for example, `apt install lzop`).
+
+lzop is Copyright (C) 1996-2017 Markus Franz Xaver Johannes Oberhumer and the
+LZO library it embeds are licensed under the GNU General Public License, version
+2 or later. Run `lzop -L` on a binary to print its embedded license notice.
+
+lzop is a distinct program from AIK itself and carries its own license; see
+<https://www.oberhumer.com/opensource/lzop/> for the upstream source.
