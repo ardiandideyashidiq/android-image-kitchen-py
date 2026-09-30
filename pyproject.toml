@@ -1,7 +1,7 @@
 [project]
 name = "aik-py"
 version = "0.1.0"
-description = "Add your description here"
+description = "Native Python reimplementation of the Android Image Kitchen boot/recovery image toolkit"
 readme = "README.md"
 authors = [
     { name = "rdndds", email = "rdndds@gmail.com" }
@@ -9,9 +9,16 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "loguru>=0.7.3",
+    "lz4>=4.4.5",
     "rich>=15.0.0",
     "rich-click>=1.9.9",
 ]
+
+# The bundled prebuilt tools in bin/ are deliberately NOT shipped in the wheel:
+# they are large, x86_64-specific binaries. Tool lookup resolves them at runtime,
+# preferring an AIK_PY_BIN_ROOT env override and falling back to the repo checkout.
+[project.scripts]
+aik-py = "aik_py.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
@@ -19,5 +26,18 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.16.9",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "golden: needs real OEM boot images under tests/golden/",
+    "binary: needs the bundled prebuilt tools under bin/",
+]
+
+[tool.coverage.run]
+source = ["aik_py"]
