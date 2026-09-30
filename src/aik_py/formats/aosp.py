@@ -139,15 +139,6 @@ BOOT_EXTRA_ARGS_SIZE: Final = 1024
 
 BOOT_IMAGE_HEADER_V1_SIZE: Final = 1648
 BOOT_IMAGE_HEADER_V2_SIZE: Final = 1660
-#: ``header_version`` 0 predates the ``header_size`` field; its header ends after
-#: ``extra_cmdline``. Upstream writes a zero there, but readers still need to
-#: know how far the header reaches, so it gets a synthesised value.
-BOOT_IMAGE_HEADER_V0_SIZE: Final = 1592
-_HEADER_SIZES: Final = {
-    0: BOOT_IMAGE_HEADER_V0_SIZE,
-    1: BOOT_IMAGE_HEADER_V1_SIZE,
-    2: BOOT_IMAGE_HEADER_V2_SIZE,
-}
 
 MAX_HEADER_VERSION: Final = 2
 ID_SIZE: Final = 32
@@ -181,6 +172,21 @@ _OFF_DTB_ADDR: Final = 0x674
 _U32 = struct.Struct("<I")
 _U64 = struct.Struct("<Q")
 
+#: ``header_version`` 0 predates the ``header_size`` field, so nothing on the
+#: wire states how far its header reaches. The header still ends after
+#: ``extra_cmdline``, and a reader must require all of it; upstream simply
+#: leaves the v0 header_size slot zero.
+BOOT_IMAGE_HEADER_V0_SIZE: Final = _OFF_EXTRA_CMDLINE + BOOT_EXTRA_ARGS_SIZE
+
+_HEADER_SIZES: Final = {
+    0: BOOT_IMAGE_HEADER_V0_SIZE,
+    1: BOOT_IMAGE_HEADER_V1_SIZE,
+    2: BOOT_IMAGE_HEADER_V2_SIZE,
+}
+
+#: Digest length per hashtype; the remainder of the 32-byte id field is zeroed.
+_HASH_LENGTHS: Final = {"sha1": 20, "sha256": 32}
+
 
 def header_size_for(header_version: int) -> int:
     """Bytes the header occupies, including ``extra_cmdline``."""
@@ -195,7 +201,7 @@ def _align(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
 
 
-def _cstr(field: bytes, what: str) -> bytes:
+def _cstr(field: bytes) -> bytes:
     """Strip NUL padding off a read-back header string.
 
     A field may legitimately have no terminator at all: mkbootimg fills the
@@ -229,10 +235,12 @@ def _payloads(image: BootImage) -> list[tuple[str, bytes]]:
     """Payloads in on-disk order. Optional members are skipped when unset."""
     hv = image.header.header_version
     _check_version(hv)
-    if hv == 0 and image.recovery_dtbo:
+    # `is not None` throughout, so clearing a payload to b"" validates the same
+    # as clearing it to None rather than slipping past the version guards.
+    if hv == 0 and image.recovery_dtbo is not None:
         msg = "recovery_dtbo requires header_version >= 1"
         raise BootImageError(msg)
-    if hv < 2 and image.dtb:
+    if hv < 2 and image.dtb is not None:
         msg = "dtb requires header_version 2"
         raise BootImageError(msg)
     out = [("kernel", image.kernel or b""), ("ramdisk", image.ramdisk or b"")]
@@ -256,6 +264,10 @@ def _hash_id(algorithm: HashType, image: BootImage) -> bytes:
     Upstream AOSP dropped --hashtype and now hashes as sha1 unconditionally;
     the AIK build keeps both, which is why the algorithm is a parameter here.
     """
+    if algorithm not in _HASH_LENGTHS:
+        msg = f"unsupported hashtype {algorithm!r}; expected one of {sorted(_HASH_LENGTHS)}"
+        raise BootImageError(msg)
+
     hv = image.header.header_version
     slots: list[bytes | None] = [
         image.kernel or b"",
@@ -324,7 +336,8 @@ def _build_header(image: BootImage) -> bytes:
     if hv >= 1:
         if image.recovery_dtbo is not None:
             _U32.pack_into(out, _OFF_RECOVERY_DTBO_SIZE, len(image.recovery_dtbo))
-            _U32.pack_into(
+            # A file offset into the image, 64-bit -- unlike the u32 load addresses.
+            _U64.pack_into(
                 out,
                 _OFF_RECOVERY_DTBO_OFFSET,
                 header.recovery_dtbo_offset & 0xFFFFFFFFFFFFFFFF,
@@ -335,7 +348,7 @@ def _build_header(image: BootImage) -> bytes:
             _U32.pack_into(out, _OFF_DTB_SIZE, len(image.dtb))
         # dtb_addr is base + dtb_offset and is written whether or not a dtb is
         # present; the tools emit a non-zero value even for a dtb-less v2 image.
-        _U64.pack_into(out, _OFF_DTB_ADDR, header.dtb_addr)
+        _U64.pack_into(out, _OFF_DTB_ADDR, header.dtb_addr & 0xFFFFFFFFFFFFFFFF)
     return bytes(out)
 
 
@@ -412,6 +425,13 @@ def parse(data: bytes) -> BootImage:
     elif page_size % 4:
         msg = f"implausible page_size {page_size}: not a multiple of 4"
         raise BootImageError(msg)
+    # page sizes must fit the known header sizes and be sane for a boot image
+    if page_size < header_size:
+        msg = f"implausible page_size {page_size}: smaller than header of {header_size} bytes"
+        raise BootImageError(msg)
+    if page_size > 0x7FFFFFFF:
+        msg = f"implausible page_size {page_size}"
+        raise BootImageError(msg)
 
     header = BootImageHeader(
         kernel_addr=_u32(data, _OFF_KERNEL_ADDR, "kernel_addr"),
@@ -421,11 +441,10 @@ def parse(data: bytes) -> BootImage:
         page_size=page_size,
         header_version=header_version,
         os_version=OsVersion.unpack(_u32(data, _OFF_OS_VERSION, "os_version")),
-        name=_cstr(data[_OFF_NAME : _OFF_NAME + BOOT_NAME_SIZE], "board name"),
-        cmdline=_cstr(data[_OFF_CMDLINE : _OFF_CMDLINE + BOOT_ARGS_SIZE], "cmdline"),
+        name=_cstr(data[_OFF_NAME : _OFF_NAME + BOOT_NAME_SIZE]),
+        cmdline=_cstr(data[_OFF_CMDLINE : _OFF_CMDLINE + BOOT_ARGS_SIZE]),
         extra_cmdline=_cstr(
-            data[_OFF_EXTRA_CMDLINE : _OFF_EXTRA_CMDLINE + BOOT_EXTRA_ARGS_SIZE],
-            "extra_cmdline",
+            data[_OFF_EXTRA_CMDLINE : _OFF_EXTRA_CMDLINE + BOOT_EXTRA_ARGS_SIZE]
         ),
         id=data[_OFF_ID : _OFF_ID + ID_SIZE],
     )
@@ -446,8 +465,11 @@ def parse(data: bytes) -> BootImage:
 
     # A sha1 id occupies 20 bytes and the other 12 are zero padding; a sha256 id
     # fills all 32. Deriving the length from the padding recovers hashtype without
-    # needing to re-hash. (An all-zero id is read as sha1, the tools' default.)
-    significant = 20 if not any(header.id[20:]) else ID_SIZE
+    # re-hashing, which is the only signal on the wire -- both tools report
+    # hashtype from exactly this. A sha256 digest whose last 12 bytes are all zero
+    # is indistinguishable from sha1 padding and is read as sha1; that costs at
+    # most the id's round-trip fidelity, never payload correctness.
+    significant = _HASH_LENGTHS["sha1"] if not any(header.id[20:]) else ID_SIZE
     header.hashtype = "sha1" if significant == 20 else "sha256"
     header.id = bytes(header.id[:significant])
 

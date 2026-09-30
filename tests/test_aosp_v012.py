@@ -50,6 +50,8 @@ def make_image(
         "ramdisk_addr": 0x81000000,
         "second_addr": 0x80F00000,
         "tags_addr": 0x80000100,
+        "dtb_addr": 0x01F00000,
+        "recovery_dtbo_offset": 0x4000,
         "name": b"testboard",
         "cmdline": b"console=ttyS0",
         "os_version": OsVersion(11, 0, 0, 21, 8),
@@ -60,8 +62,6 @@ def make_image(
             page_size=page_size,
             header_version=header_version,
             hashtype=hashtype,
-            dtb_addr=0x01F00000,
-            recovery_dtbo_offset=0x4000,
             **kwargs,
         ),
         kernel=kernel,
@@ -432,6 +432,61 @@ def test_pack_accepts_minimum_viable_page_size() -> None:
         out = parse(pack(img))
         assert out.header.page_size == 2048
         assert out.kernel == KERNEL
+
+
+def test_parse_rejects_page_size_smaller_than_the_header() -> None:
+    """A corrupt page_size field must raise, not read payloads from wrong offsets."""
+    data = bytearray(pack(make_image(header_version=2, second=SECOND, dtb=DTB)))
+    struct.pack_into("<I", data, 0x24, 512)
+    with pytest.raises(BootImageError, match="smaller than"):
+        parse(bytes(data))
+
+
+def test_recovery_dtbo_offset_is_64_bit() -> None:
+    big = 0x1_0000_0040
+    img = make_image(
+        header_version=1,
+        second=SECOND,
+        recovery_dtbo=RDTBO,
+        recovery_dtbo_offset=big,
+    )
+    data = pack(img)
+    assert struct.unpack_from("<Q", data, 0x664)[0] == big
+    assert parse(data).header.recovery_dtbo_offset == big
+
+
+def test_rejects_unknown_hashtype() -> None:
+    with pytest.raises(BootImageError, match="hashtype"):
+        pack(make_image(hashtype="sha512"))
+    with pytest.raises(BootImageError, match="hashtype"):
+        pack(make_image(hashtype="md5"))
+
+
+def test_negative_addresses_are_masked_not_crashed() -> None:
+    img = make_image(
+        header_version=2,
+        dtb=DTB,
+        kernel_addr=-1,
+        tags_addr=-0x1000,
+        dtb_addr=-1,
+    )
+    out = parse(pack(img))
+    assert out.header.kernel_addr == 0xFFFFFFFF
+    assert out.header.dtb_addr == 0xFFFFFFFFFFFFFFFF
+
+
+def test_empty_optional_payload_validates_like_none() -> None:
+    with pytest.raises(BootImageError, match="recovery_dtbo requires"):
+        pack(make_image(header_version=0, recovery_dtbo=b""))
+    with pytest.raises(BootImageError, match="dtb requires"):
+        pack(make_image(header_version=1, dtb=b""))
+
+
+def test_v0_header_requires_all_of_extra_cmdline() -> None:
+    """v0 has no header_size field, so the reader must know it ends at 1632."""
+    data = pack(make_image(header_version=0))
+    with pytest.raises(BootImageError, match="header bytes|truncated"):
+        parse(data[:1600])
 
 
 def test_pack_rejects_oversized_board_name() -> None:
