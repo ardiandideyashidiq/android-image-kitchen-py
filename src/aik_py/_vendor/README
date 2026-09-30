@@ -1,0 +1,42 @@
+Vendored third-party code
+=========================
+
+avbtool.py
+----------
+
+Upstream: Android Open Source Project, `external/avb`
+URL:      https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py
+          (base64 via `?format=TEXT`)
+Fetched:  2026-09-30, branch `refs/heads/main`
+Version:  avbtool 1.3.0 (AVB_VERSION_MAJOR.MINOR.SUB in the file)
+SHA-256:  e5a664a38db623da00f080219bc0ee60a640a9dc4a872803616fae4938ac749b
+          (of the *upstream* file, i.e. what the snippet below reproduces;
+          the committed copy hashes to 1d9d7982... because of the header note)
+License:  Apache License 2.0 (header preserved verbatim in the file)
+
+The only modification is a `# ruff: noqa` line and an explanatory comment
+inserted above the copyright header, so the file is otherwise byte-identical
+to upstream. Confirm with:
+
+    python - <<'EOF'
+    import base64, hashlib, urllib.request
+    raw = urllib.request.urlopen(
+        "https://android.googlesource.com/platform/external/avb/+"
+        "/refs/heads/main/avbtool.py?format=TEXT").read()
+    print(hashlib.sha256(base64.b64decode(raw)).hexdigest())
+    EOF
+
+Why vendored
+------------
+
+`avbtool` is not distributable on PyPI. There is no `avbtool` / `avb-tool` /
+`avbpy` / `android-avb` package. The similarly named `pyavb` on PyPI is the
+Avid video codec container format and is entirely unrelated to Android
+Verified Boot.
+
+The Bash toolkit this project replaces shipped AVB v1 signing only, via the
+prebuilt `bin/boot_signer.jar`. That produces a `02 01 01 30 82` signature
+block which is not an AVB v2 vbmeta, so images repacked by AIK are not
+genuinely AVB-signed. Vendoring upstream avbtool gives real AVB v2
+(`AVBf` footer + `AVB0` vbmeta) signing, which is the behaviour the Bash
+toolkit lacked.

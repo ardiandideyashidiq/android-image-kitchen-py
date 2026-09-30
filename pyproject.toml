@@ -21,3 +21,7 @@ build-backend = "uv_build"
 dev = [
     "ruff>=0.16.9",
 ]
+
+[tool.ruff]
+# Vendored third-party sources are kept byte-identical to upstream.
+extend-exclude = ["src/aik_py/_vendor"]
