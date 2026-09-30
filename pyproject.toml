@@ -19,5 +19,13 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.16.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "binary: needs the prebuilt tools under bin/ (skips when unavailable)",
 ]
