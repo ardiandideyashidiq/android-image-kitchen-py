@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # ruff: noqa
 # VENDORED THIRD-PARTY FILE -- DO NOT EDIT, DO NOT REFORMAT.
-# Unmodified copy of AOSP external/avb avbtool.py (avbtool 1.3.0), the only
-# complete implementation of AVB v2 signing. See _vendor/README for provenance.
-# The single edit is the `# ruff: noqa` line above, so the shared pyproject.toml
-# needs no per-file-ignore entry for this file.
+# Byte-identical to AOSP external/avb avbtool.py (avbtool 1.3.0) apart from
+# this comment block. See _vendor/README for provenance and hashes.
 
 # Copyright 2016, The Android Open Source Project
 #

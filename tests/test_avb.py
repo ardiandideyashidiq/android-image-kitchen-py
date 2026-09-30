@@ -10,6 +10,7 @@ import hashlib
 import shutil
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from aik_py.avb import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUNDLED_KEY = REPO_ROOT / "bin" / "avb" / "verity.pk8"
 BUNDLED_CERT = REPO_ROOT / "bin" / "avb" / "verity.x509.pem"
+VENDORED_AVBTOOL = Path(avbtool.__file__)
 
 requires_key = pytest.mark.skipif(
     not BUNDLED_KEY.is_file() or not BUNDLED_CERT.is_file(),
@@ -66,22 +68,22 @@ class TestResolveKey:
         assert key.pk8 == BUNDLED_KEY
         assert key.certificate == BUNDLED_CERT
 
+    @requires_key
     def test_finds_user_key_in_directory(self, tmp_path: Path) -> None:
-        requires_key_is_file()
         expected = _make_key(tmp_path, "custom")
         found = resolve_key("custom", [tmp_path])
         assert found.pk8 == expected.pk8
         assert found.certificate == expected.certificate
 
+    @requires_key
     def test_finds_key_by_bare_path(self, tmp_path: Path) -> None:
-        requires_key_is_file()
         expected = _make_key(tmp_path, "bare")
         found = resolve_key(str(tmp_path / "bare"), [])
         assert found.pk8 == expected.pk8
 
+    @requires_key
     def test_prefers_bare_path_over_search_dir(self, tmp_path: Path) -> None:
         """repackimg.sh probed "$2" before "$cur/$2" and "$aik/$2"."""
-        requires_key_is_file()
         first = _make_key(tmp_path / "first", "dup")
         _make_key(tmp_path / "second", "dup")
         found = resolve_key(str(tmp_path / "first" / "dup"), [tmp_path / "second"])
@@ -109,9 +111,9 @@ class TestResolveKey:
         assert str(tmp_path / "a" / "absent") in message
         assert str(tmp_path / "b" / "absent") in message
 
+    @requires_key
     def test_accepts_alternate_certificate_extension(self, tmp_path: Path) -> None:
         """The Bash globbed ``$keytest.x509.*``, so the extension is not fixed."""
-        requires_key_is_file()
         _make_key(tmp_path, "altext")
         (tmp_path / "altext.x509.pem").unlink()
         (tmp_path / "altext.x509.der").write_bytes(BUNDLED_CERT.read_bytes())
@@ -122,11 +124,6 @@ class TestResolveKey:
         """A name like ``we[i]rd`` must not blow up certificate resolution."""
         with pytest.raises(SignatureError):
             resolve_key("we[i]rd", [tmp_path])
-
-
-def requires_key_is_file() -> None:
-    if not BUNDLED_KEY.is_file() or not BUNDLED_CERT.is_file():
-        pytest.skip("bundled AVB test key not present")
 
 
 @requires_key
@@ -144,6 +141,43 @@ class TestAddHashFooter:
         signed = add_hash_footer(self.image, "boot", BUNDLED_KEY, BUNDLED_CERT)
         original_size = struct.unpack_from("!Q", signed, len(signed) - 64 + 12)[0]
         assert original_size == len(self.image)
+
+    def test_malformed_sparse_image_raises_signature_error(self) -> None:
+        """A truncated sparse header must not leak struct.error/ValueError."""
+        truncated = struct.pack("<I4H4I", 0xED26FF3A, 1, 0, 0, 0, 0, 0, 0, 0)[:6]
+        with pytest.raises(SignatureError):
+            add_hash_footer(truncated, "system", BUNDLED_KEY, BUNDLED_CERT)
+
+    def test_resigning_padded_image_does_not_raise(self) -> None:
+        """A signed image with extra trailing slack re-signs to a smaller output."""
+        signed = add_hash_footer(self.image, "boot", BUNDLED_KEY, BUNDLED_CERT)
+        padded = signed + b"\0" * 8192
+        assert len(padded) > len(signed)
+        resigned = add_hash_footer(padded, "boot", BUNDLED_KEY, BUNDLED_CERT)
+        assert resigned[-64:-60] == avbtool.AvbFooter.MAGIC
+        # avbtool keeps the padded bytes as the image and re-appends metadata.
+        assert struct.unpack_from("!Q", resigned, len(resigned) - 64 + 12)[0] == len(
+            padded
+        )
+        assert resigned.startswith(padded)
+
+    def test_explicit_partition_size_pads_to_that_size(self) -> None:
+        """Passing the real partition size controls the final image size."""
+        trimmed = add_hash_footer(
+            self.image, "boot", BUNDLED_KEY, BUNDLED_CERT, partition_size=131072
+        )
+        assert len(trimmed) == 131072
+        assert trimmed[: len(self.image)] == self.image
+        assert partition_name_from_footer(trimmed) == "boot"
+        assert struct.unpack_from("!Q", trimmed, len(trimmed) - 64 + 12)[0] == len(
+            self.image
+        )
+
+    def test_default_output_reserves_metadata_allowance(self) -> None:
+        """Without a partition size the output carries avbtool's 72 KiB slack."""
+        signed = add_hash_footer(self.image, "boot", BUNDLED_KEY, BUNDLED_CERT)
+        slack = len(signed) - len(self.image)
+        assert slack >= 4096, "expected room for the vbmeta and footer block"
 
     def test_vbmeta_parses_and_carries_partition_name(self) -> None:
         for name in ("boot", "recovery"):
@@ -319,3 +353,64 @@ class TestPartitionNameFromFooter:
     def test_round_trips_through_footer(self) -> None:
         signed = add_hash_footer(b"payload" * 16, "recovery", BUNDLED_KEY, BUNDLED_CERT)
         assert partition_name_from_footer(signed) == "recovery"
+
+    @requires_key
+    @requires_openssl
+    def test_reads_hashtree_descriptor(self, tmp_path: Path) -> None:
+        """dm-verity partitions carry a hashtree descriptor, not a hash one.
+
+        AvbHashDescriptor raises LookupError on that blob, so this used to
+        escape instead of returning the name.
+        """
+        raw = tmp_path / "hashtree.img"
+        raw.write_bytes(b"Z" * 4096)
+        pem = tmp_path / "key.pem"
+        subprocess.run(
+            [
+                "openssl",
+                "pkcs8",
+                "-inform",
+                "DER",
+                "-in",
+                str(BUNDLED_KEY),
+                "-nocrypt",
+                "-out",
+                str(pem),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(VENDORED_AVBTOOL),
+                "add_hashtree_footer",
+                "--image",
+                str(raw),
+                "--partition_size",
+                "131072",
+                "--partition_name",
+                "system",
+                "--hash_algorithm",
+                "sha256",
+                "--do_not_generate_fec",
+                "--key",
+                str(pem),
+                "--algorithm",
+                "SHA256_RSA2048",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        assert partition_name_from_footer(raw.read_bytes()) == "system"
+
+    def test_returns_none_for_sparse_image(self) -> None:
+        """Footer offsets are unsparsified, so they cannot index raw bytes."""
+        footer = avbtool.AvbFooter()
+        footer.original_image_size = 4096
+        footer.vbmeta_offset = 4096
+        footer.vbmeta_size = 1344
+        image = bytearray(b"\xab" * 8192)
+        image[-64:] = footer.encode()
+        sparse = bytearray(struct.pack("<I", 0xED26FF3A)) + bytearray(image)
+        assert partition_name_from_footer(bytes(sparse)) is None

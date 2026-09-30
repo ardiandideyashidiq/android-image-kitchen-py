@@ -231,14 +231,13 @@ def add_hash_footer(
     certificate: Path,
     *,
     hash_algorithm: str = "sha256",
+    partition_size: int | None = None,
 ) -> bytes:
     """Sign ``image`` and return it with an AVB v2 hash footer appended.
 
     The result is the original image, zero-padded to a 4096-byte boundary,
     followed by the ``AVB0`` vbmeta blob, a DONT_CARE region, and a 64-byte
-    ``AVBf`` footer describing the layout. ``avbtool`` sizes the output from
-    the image rather than taking a fixed partition size, so the signed image is
-    only as large as it needs to be.
+    ``AVBf`` footer describing the layout.
 
     Args:
         image: Raw partition image, e.g. a ``boot.img`` from ``mkbootimg``.
@@ -252,6 +251,13 @@ def add_hash_footer(
             certificate is not embedded in an AVB v2 hash footer, which
             carries the public key in the vbmeta auxiliary block instead.
         hash_algorithm: Digest for the image hash descriptor.
+        partition_size: Size of the target partition. When None the output is
+            sized from the image, which reserves avbtool's conservative
+            worst-case metadata allowance (64 KiB vbmeta + 4 KiB footer, about
+            72 KiB total) and so noticeably inflates small images. Pass the
+            real partition size to avoid that slack; it must leave room for
+            the metadata or avbtool will refuse. Real partitions are block
+            aligned, so this normally only trims padding.
 
     Returns:
         The signed image bytes.
@@ -283,8 +289,8 @@ def add_hash_footer(
         try:
             avb.add_hash_footer(
                 str(image_path),
-                None,  # partition_size
-                1,  # dynamic_partition_size: grow only as much as needed
+                partition_size,
+                None if partition_size is not None else 1,  # dynamic_partition_size
                 partition_name,
                 hash_algorithm,
                 None,  # salt: let avbtool pick random bytes of digest size
@@ -314,16 +320,23 @@ def add_hash_footer(
             )
         except avbtool.AvbError as exc:
             raise SignatureError(f"avbtool failed to add a hash footer: {exc}") from exc
+        except (struct.error, LookupError, ValueError, OSError) as exc:
+            # ImageHandler raises bare struct.error/ValueError on a malformed
+            # (e.g. truncated sparse) image, before avbtool's own error
+            # handling can wrap it.
+            raise SignatureError(f"avbtool could not read the image: {exc}") from exc
 
         signed = image_path.read_bytes()
 
-    # Re-signing an already-signed image does not necessarily grow it: avbtool
-    # truncates back to the stored original size first, so the result can be
-    # the same length. Only a shrink is a failure.
-    if len(signed) < len(image):
+    # A signed image may legitimately come out the same size or, when the
+    # input already carried AVB metadata that avbtool strips and re-pads, a
+    # different size. The invariant that always holds is that the footer
+    # points at a real vbmeta inside the output, so validate that instead of
+    # comparing lengths.
+    if len(signed) < len(image) and signed[: len(image)] != image:
         raise SignatureError(
-            f"AVB signing shrank the image: {len(signed)} bytes from "
-            f"{len(image)} bytes."
+            f"AVB signing corrupted the image: output is {len(signed)} bytes "
+            f"from {len(image)} and no longer starts with the input."
         )
     if signed[-64:-60] != avbtool.AvbFooter.MAGIC:
         raise SignatureError("AVB signing did not emit a trailing AVBf footer.")
@@ -341,15 +354,29 @@ def add_hash_footer(
     return signed
 
 
+def _is_sparse(image: bytes) -> bool:
+    """True if the image starts with the Android sparse magic.
+
+    Footer offsets refer to the *unsparsified* image, so they cannot be used
+    to slice raw file bytes of a sparse image.
+    """
+    return len(image) >= 4 and struct.unpack_from("<I", image, 0)[0] == 0xED26FF3A
+
+
 def partition_name_from_footer(image: bytes) -> str | None:
-    """Recover the partition name recorded in an image's AVB v2 hash footer.
+    """Recover the partition name recorded in an image's AVB v2 footer.
 
     ``unpackimg.sh`` detected the AVBv1 signature block and recorded the
     partition name to pass back to the signer at repack time. This reads the
-    same information out of a v2 vbmeta hash descriptor, returning None when
-    the image carries no AVB v2 footer.
+    same information out of a v2 vbmeta descriptor, returning None when the
+    image carries no AVB v2 footer.
+
+    Sparse images yield None: the footer stores offsets into the unsparsified
+    image, so they do not index the raw file bytes.
     """
     if len(image) < avbtool.AvbFooter.SIZE:
+        return None
+    if _is_sparse(image):
         return None
     footer = image[-avbtool.AvbFooter.SIZE :]
     if footer[:4] != avbtool.AvbFooter.MAGIC:
@@ -362,7 +389,7 @@ def partition_name_from_footer(image: bytes) -> str | None:
     vbmeta = image[vbmeta_offset : vbmeta_offset + vbmeta_size]
     try:
         header = avbtool.AvbVBMetaHeader(vbmeta[: avbtool.AvbVBMetaHeader.SIZE])
-    except (avbtool.AvbError, struct.error, IndexError, ValueError):
+    except (avbtool.AvbError, LookupError, struct.error, IndexError, ValueError):
         return None
 
     aux_start = avbtool.AvbVBMetaHeader.SIZE + header.authentication_data_block_size
@@ -371,7 +398,11 @@ def partition_name_from_footer(image: bytes) -> str | None:
         header.descriptors_offset : header.descriptors_offset + header.descriptors_size
     ]
     try:
-        descriptor = avbtool.AvbHashDescriptor(descriptors)
-    except (avbtool.AvbError, struct.error, IndexError, ValueError):
+        parsed = avbtool.parse_descriptors(descriptors)
+    except (struct.error, IndexError, ValueError):
         return None
-    return descriptor.partition_name or None
+    for descriptor in parsed:
+        name = getattr(descriptor, "partition_name", None)
+        if name:
+            return name
+    return None

@@ -9,22 +9,39 @@ URL:      https://android.googlesource.com/platform/external/avb/+/refs/heads/ma
           (base64 via `?format=TEXT`)
 Fetched:  2026-09-30, branch `refs/heads/main`
 Version:  avbtool 1.3.0 (AVB_VERSION_MAJOR.MINOR.SUB in the file)
-SHA-256:  e5a664a38db623da00f080219bc0ee60a640a9dc4a872803616fae4938ac749b
-          (of the *upstream* file, i.e. what the snippet below reproduces;
-          the committed copy hashes to 1d9d7982... because of the header note)
-License:  Apache License 2.0 (header preserved verbatim in the file)
+License:  Apache License 2.0 (copyright header preserved verbatim)
 
-The only modification is a `# ruff: noqa` line and an explanatory comment
-inserted above the copyright header, so the file is otherwise byte-identical
-to upstream. Confirm with:
+Local modifications
+-------------------
+
+Exactly one change: a 4-line comment block is inserted between the shebang and
+the copyright header. It carries a `# ruff: noqa` directive so the file is not
+linted or reformatted, plus a "do not edit" notice. Nothing else is touched --
+every byte from the copyright header onwards is identical to upstream.
+
+Two hashes, because there are two files:
+
+  upstream, as fetched
+      e5a664a38db623da00f080219bc0ee60a640a9dc4a872803616fae4938ac749b
+  this file, as committed
+      see VERIFY below (differs only by the header comment)
+
+To re-verify, compare the committed file against upstream after stripping the
+inserted comment block. It must match exactly:
 
     python - <<'EOF'
-    import base64, hashlib, urllib.request
-    raw = urllib.request.urlopen(
-        "https://android.googlesource.com/platform/external/avb/+"
-        "/refs/heads/main/avbtool.py?format=TEXT").read()
-    print(hashlib.sha256(base64.b64decode(raw)).hexdigest())
+    import base64, hashlib, pathlib, urllib.request
+    url = ("https://android.googlesource.com/platform/external/avb/+"
+           "/refs/heads/main/avbtool.py?format=TEXT")
+    upstream = base64.b64decode(urllib.request.urlopen(url).read())
+    local = pathlib.Path("src/aik_py/_vendor/avbtool.py").read_bytes()
+    # Everything from the copyright header onwards must be byte-identical.
+    marker = b"# Copyright 2016, The Android Open Source Project"
+    assert local[local.index(marker):] == upstream[upstream.index(marker):]
+    print("OK: vendored file matches upstream after the license header")
+    print("local sha256:", hashlib.sha256(local).hexdigest())
     EOF
+
 
 Why vendored
 ------------
